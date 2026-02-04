@@ -14,9 +14,6 @@ contract DeployPrivBatchHook is Script {
     // Base Sepolia PoolManager address
     address constant POOLMANAGER = 0x8C4BcBE6b9eF47855f97E675296FA3F6fafa5F1A;
 
-    // Gelato Automate address on Base Sepolia (update with actual address)
-    address constant GELATO_AUTOMATE = address(0); // TODO: Add Gelato address
-
     function run() external {
         uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");
         address deployer = vm.addr(deployerPrivateKey);
@@ -40,7 +37,7 @@ contract DeployPrivBatchHook is Script {
             deployer,
             flags,
             type(PrivBatchHook).creationCode,
-            abi.encode(POOLMANAGER, GELATO_AUTOMATE)
+            abi.encode(POOLMANAGER)
         );
 
         console.log("Mined hook address:", hookAddress);
@@ -48,8 +45,7 @@ contract DeployPrivBatchHook is Script {
 
         // Deploy hook using CREATE2
         PrivBatchHook hook = new PrivBatchHook{salt: salt}(
-            IPoolManager(POOLMANAGER),
-            GELATO_AUTOMATE
+            IPoolManager(POOLMANAGER)
         );
 
         require(address(hook) == hookAddress, "Hook address mismatch");
