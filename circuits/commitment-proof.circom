@@ -6,7 +6,7 @@ pragma circom 2.1.6;
 // Private inputs: All trade parameters (hidden)
 // Public input: commitmentHash only (visible)
 
-include "circomlib/poseidon.circom";
+include "poseidon.circom";
 
 template CommitmentProof() {
     // Private inputs (hidden - these are the trade parameters)
@@ -19,8 +19,8 @@ template CommitmentProof() {
     signal input nonce;          // Nonce for uniqueness
     signal input deadline;       // Deadline timestamp
     
-    // Public output (visible - this is the commitment hash)
-    signal output commitmentHash;
+    // Public input (visible - this is the commitment hash to verify against)
+    signal input commitmentHash;
     
     // Poseidon hash with 8 inputs (one for each parameter)
     // Poseidon is ZK-friendly and much cheaper than Keccak256 in ZK proofs
@@ -36,8 +36,8 @@ template CommitmentProof() {
     poseidon.inputs[6] <== nonce;
     poseidon.inputs[7] <== deadline;
     
-    // Output the hash
-    commitmentHash <== poseidon.out;
+    // Verify the computed hash matches the public commitmentHash
+    commitmentHash === poseidon.out;
 }
 
 // Main component with public commitmentHash

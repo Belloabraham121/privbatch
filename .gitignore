@@ -10,6 +10,9 @@ out/
 # Docs
 docs/
 
+
+circom-source/
+
 # Dotenv file
 .env
 HACKATHON_DEMO.md
