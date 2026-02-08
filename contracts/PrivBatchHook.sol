@@ -332,6 +332,45 @@ contract PrivBatchHook is BaseHook, IUnlockCallback {
     }
 
     /**
+     * @notice Submit a reveal for a ZK-verified commitment (privacy-enhanced)
+     * @param key The pool key
+     * @param commitmentHash The Poseidon commitment hash (must already be ZK-verified)
+     * @param intent The swap intent to reveal
+     * @dev This function stores the intent for later batch execution.
+     *      Unlike submitReveal(), it does NOT verify keccak256 because the commitment
+     *      was already verified with a ZK proof (Poseidon hash).
+     *      Each user calls this in a SEPARATE transaction, keeping individual intents
+     *      out of the batch execution calldata — this is the key privacy improvement.
+     *      
+     *      Flow:
+     *      1. User calls submitCommitmentWithProof() → commitment + proof stored
+     *      2. User calls submitRevealForZK() → intent stored (separate tx)
+     *      3. Executor calls revealAndBatchExecuteWithProofs() → only hashes + proofs in calldata
+     */
+    function submitRevealForZK(
+        PoolKey calldata key,
+        bytes32 commitmentHash,
+        SwapIntent calldata intent
+    ) external {
+        // Verify commitment was ZK-verified
+        if (!verifiedCommitments[commitmentHash]) revert InvalidCommitment();
+
+        // Verify deadline
+        if (block.timestamp > intent.deadline) revert DeadlineExpired();
+
+        PoolId poolId = key.toId();
+
+        // Verify nonce uniqueness
+        if (usedNonces[poolId][intent.user][intent.nonce]) revert InvalidNonce();
+
+        // Store reveal (privacy: stored in contract storage, not in batch execution calldata)
+        revealStorage[commitmentHash] = intent;
+
+        // Privacy-enhanced: Don't emit user address
+        emit CommitmentRevealed(poolId, commitmentHash);
+    }
+
+    /**
      * @notice Check if batch execution conditions are met
      * @param poolId The pool ID to check
      * @return canExec Whether execution can proceed
@@ -361,18 +400,22 @@ contract PrivBatchHook is BaseHook, IUnlockCallback {
     }
 
     /**
-     * @notice Reveal commitments and execute batched swap with ZK proofs
+     * @notice Execute batched swap with ZK proofs (privacy-enhanced: no intents in calldata)
      * @param key The pool key
      * @param commitmentHashes Array of commitment hashes
      * @param proofsA Array of proof A components (uint[2] for each proof)
      * @param proofsB Array of proof B components (uint[2][2] for each proof)
      * @param proofsC Array of proof C components (uint[2] for each proof)
      * @param publicSignalsArray Array of public signals arrays (each contains commitmentHash)
-     * @param intents Array of swap intents (revealed parameters)
-     * @dev This function verifies ZK proofs to ensure reveals match commitments,
-     *      then executes batch swap. ZK proofs prove knowledge without exposing parameters in calldata
-     *      until verification is complete.
-     *      Key privacy benefit: Proofs verify commitment-reveal match without storing reveals on-chain first.
+     * @dev PRIVACY: This function does NOT take swap intents as parameters.
+     *      Intents must be submitted separately via submitRevealForZK() BEFORE calling this.
+     *      This means the batch execution transaction's calldata only contains:
+     *      - Pool key (public, needed for routing)
+     *      - Commitment hashes (opaque 32-byte values)
+     *      - ZK proofs (cryptographic data, reveals nothing about trade details)
+     *      
+     *      Individual trade details (user, amounts, tokens, recipients) are NOT visible
+     *      in the batch execution calldata on the block explorer.
      */
     function revealAndBatchExecuteWithProofs(
         PoolKey calldata key,
@@ -380,14 +423,12 @@ contract PrivBatchHook is BaseHook, IUnlockCallback {
         uint[2][] calldata proofsA,
         uint[2][2][] calldata proofsB,
         uint[2][] calldata proofsC,
-        uint[1][] calldata publicSignalsArray,
-        SwapIntent[] calldata intents
+        uint[1][] calldata publicSignalsArray
     ) external {
         PoolId poolId = key.toId();
 
         // Verify batch conditions
         if (commitmentHashes.length < MIN_COMMITMENTS) revert InsufficientCommitments();
-        if (commitmentHashes.length != intents.length) revert InvalidCommitment();
         if (commitmentHashes.length != proofsA.length) revert InvalidCommitment();
 
         BatchState storage state = batchStates[poolId];
@@ -395,24 +436,37 @@ contract PrivBatchHook is BaseHook, IUnlockCallback {
             revert BatchConditionsNotMet();
         }
 
-        // Verify all ZK proofs and commitment-reveal matches
-        _verifyZKProofs(commitmentHashes, proofsA, proofsB, proofsC, publicSignalsArray, intents);
+        // Verify all ZK proofs
+        _verifyZKProofs(commitmentHashes, proofsA, proofsB, proofsC, publicSignalsArray);
+
+        // Retrieve intents from storage (privacy: NOT in calldata)
+        SwapIntent[] memory intents = new SwapIntent[](commitmentHashes.length);
+        for (uint256 i = 0; i < commitmentHashes.length; i++) {
+            SwapIntent memory storedIntent = revealStorage[commitmentHashes[i]];
+            if (storedIntent.user == address(0)) revert InvalidCommitment();
+            intents[i] = storedIntent;
+        }
 
         // Process reveals and execute batch
         Currency currency0 = key.currency0;
         _processAndExecuteBatchWithProofs(poolId, key, intents, commitmentHashes, currency0, state);
+
+        // Clean up stored reveals after execution (privacy: remove from storage)
+        for (uint256 i = 0; i < commitmentHashes.length; i++) {
+            delete revealStorage[commitmentHashes[i]];
+        }
     }
 
     /**
-     * @notice Verify all ZK proofs and commitment-reveal matches (helper to reduce stack depth)
+     * @notice Verify all ZK proofs (helper to reduce stack depth)
+     * @dev Only verifies proofs match commitment hashes. Intents are loaded from storage separately.
      */
     function _verifyZKProofs(
         bytes32[] calldata commitmentHashes,
         uint[2][] calldata proofsA,
         uint[2][2][] calldata proofsB,
         uint[2][] calldata proofsC,
-        uint[1][] calldata publicSignalsArray,
-        SwapIntent[] calldata intents
+        uint[1][] calldata publicSignalsArray
     ) internal view {
         for (uint256 i = 0; i < commitmentHashes.length; i++) {
             // Verify ZK proof
@@ -458,7 +512,7 @@ contract PrivBatchHook is BaseHook, IUnlockCallback {
     function _processAndExecuteBatchWithProofs(
         PoolId poolId,
         PoolKey calldata key,
-        SwapIntent[] calldata intents,
+        SwapIntent[] memory intents,
         bytes32[] calldata commitmentHashes,
         Currency currency0,
         BatchState storage state

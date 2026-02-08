@@ -318,8 +318,7 @@ contract PrivBatchHookZKTest is Test {
             proofsA,
             proofsB,
             proofsC,
-            publicSignalsArray,
-            intents
+            publicSignalsArray
         );
     }
 

@@ -32,7 +32,7 @@ contract SetupPoolLiquidity is Script {
     // Pool parameters
     uint24 constant FEE = 3000; // 0.3%
     int24 constant TICK_SPACING = 60;
-    address constant HOOK = 0xE031283df52C41F30bfd75a45623256469f8C0c4;
+    address constant HOOK = 0x2EEeC56B3037EC07cf2024a896C9708Bc94280C4;
     
     // Liquidity amounts — currency0 = USDT (18 dec), currency1 = USDC (6 dec)
     uint256 constant AMOUNT0_DESIRED = 102 * 10**17; // 10.2 USDT (18 decimals) — currency0
