@@ -228,13 +228,16 @@ async function testEndToEndZKFlow() {
     const swapIntents = [];
     const deadline = Math.floor(Date.now() / 1000) + 3600; // 1 hour from now
 
+    // Get USDT decimals (18 for mock USDT)
+    const usdtDecimals = 18; // Mock USDT has 18 decimals
+    
     // User 1: Swap 1 USDC for USDT
     swapIntents.push(createSwapIntent(
         users[0],
-        USDC_ADDRESS,
         USDT_ADDRESS,
+        USDC_ADDRESS,
         ethers.parseUnits('1', 6), // 1 USDC (6 decimals)
-        ethers.parseUnits('0.99', 6), // Min 0.99 USDT
+        ethers.parseUnits('0.99', usdtDecimals), // Min 0.99 USDT (18 decimals)
         users[0],
         1,
         deadline
@@ -246,7 +249,7 @@ async function testEndToEndZKFlow() {
         USDC_ADDRESS,
         USDT_ADDRESS,
         ethers.parseUnits('1', 6), // 1 USDC
-        ethers.parseUnits('0.99', 6), // Min 0.99 USDT
+        ethers.parseUnits('0.99', usdtDecimals), // Min 0.99 USDT (18 decimals)
         users[1],
         1,
         deadline
@@ -258,7 +261,7 @@ async function testEndToEndZKFlow() {
         USDC_ADDRESS,
         USDT_ADDRESS,
         ethers.parseUnits('1', 6), // 1 USDC
-        ethers.parseUnits('0.99', 6), // Min 0.99 USDT
+        ethers.parseUnits('0.99', usdtDecimals), // Min 0.99 USDT (18 decimals)
         users[2],
         1,
         deadline
@@ -467,7 +470,29 @@ async function testEndToEndZKFlow() {
 
     } catch (error) {
         console.log(`\n⚠️  Batch execution failed (expected without full setup):`);
-        console.log(`   Error: ${error.message}`);
+        
+        // Decode common custom errors
+        const errorData = error.data || error.info?.error?.data;
+        let errorName = 'Unknown error';
+        if (errorData) {
+            // Common error selectors (first 4 bytes of keccak256(error signature))
+            const errorSelectors = {
+                '0xc06789fa': 'BatchConditionsNotMet() - Pool may not have liquidity, or batch interval not met',
+                '0x7983c051': 'PoolAlreadyInitialized() - Pool already initialized',
+                '0x4e663b0d': 'InsufficientCommitments() - Not enough commitments',
+                '0x5c60da1b': 'InvalidCommitment() - Commitment verification failed',
+            };
+            
+            const selector = errorData.slice(0, 10); // First 4 bytes + 0x
+            errorName = errorSelectors[selector] || `Unknown error (${selector})`;
+        }
+        
+        console.log(`   Error: ${error.message || error.shortMessage}`);
+        console.log(`   Error type: ${errorName}`);
+        if (errorData) {
+            console.log(`   Error data: ${errorData}`);
+        }
+        
         console.log(`\n✅ Proof format and submission verified successfully`);
         console.log(`   Full batch execution requires:`);
         console.log(`   - Pool initialization with liquidity`);

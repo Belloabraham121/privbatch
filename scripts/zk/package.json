@@ -7,7 +7,8 @@
     "generate-proof": "node generate-proof.js",
     "verify-proof": "node verify-proof.js",
     "test": "node test-proof-generation.js",
-    "test-e2e": "node test-end-to-end-zk-flow.js"
+    "test-e2e": "node test-end-to-end-zk-flow.js",
+    "setup-pool": "node setup-pool-liquidity.js"
   },
   "dependencies": {
     "@ethersproject/signing-key": "^5.7.0",
