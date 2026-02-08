@@ -5,7 +5,8 @@
   "main": "generate-proof.js",
   "scripts": {
     "generate-proof": "node generate-proof.js",
-    "test": "node generate-proof.js"
+    "verify-proof": "node verify-proof.js",
+    "test": "node test-proof-generation.js"
   },
   "dependencies": {
     "snarkjs": "^0.7.0",
