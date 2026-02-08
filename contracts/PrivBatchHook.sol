@@ -130,8 +130,11 @@ contract PrivBatchHook is BaseHook, IUnlockCallback {
     // Anyone can call revealAndBatchExecute when conditions are met
 
     // ============ Constructor ============
-    constructor(IPoolManager _poolManager) BaseHook(_poolManager) {
-        // No automation executor needed - execution is permissionless
+    // ZK Verifier for commitment proofs
+    address public immutable verifier;
+
+    constructor(IPoolManager _poolManager, address _verifier) BaseHook(_poolManager) {
+        verifier = _verifier;
     }
 
     // ============ Hook Permissions ============
