@@ -1,0 +1,24 @@
+{
+  "name": "privbatch-zk-scripts",
+  "version": "1.0.0",
+  "description": "ZK proof generation scripts for PrivBatch",
+  "main": "generate-proof.js",
+  "scripts": {
+    "generate-proof": "node generate-proof.js",
+    "test": "node generate-proof.js"
+  },
+  "dependencies": {
+    "snarkjs": "^0.7.0",
+    "circomlibjs": "^0.1.7",
+    "@ethersproject/signing-key": "^5.7.0"
+  },
+  "keywords": [
+    "zk",
+    "zero-knowledge",
+    "circom",
+    "groth16",
+    "poseidon"
+  ],
+  "author": "",
+  "license": "MIT"
+}

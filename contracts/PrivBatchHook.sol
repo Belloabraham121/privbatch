@@ -17,6 +17,7 @@ import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 import {IUnlockCallback} from "@uniswap/v4-core/src/interfaces/callback/IUnlockCallback.sol";
 import {TransientStateLibrary} from "@uniswap/v4-core/src/libraries/TransientStateLibrary.sol";
+import {Groth16Verifier} from "./CommitmentVerifier.sol";
 
 /**
  * @title PrivBatchHook
@@ -68,6 +69,11 @@ contract PrivBatchHook is BaseHook, IUnlockCallback {
         address token,
         uint256 amount
         // Removed: address recipient (privacy improvement - use recipientHash instead)
+    );
+    event CommitmentVerified(
+        PoolId indexed poolId,
+        bytes32 indexed commitmentHash
+        // ZK proof verified - commitment is valid without revealing parameters
     );
 
     // ============ Structs ============
@@ -121,6 +127,10 @@ contract PrivBatchHook is BaseHook, IUnlockCallback {
     // Privacy improvement: Store reveals separately to minimize batch execution calldata
     // Key: commitmentHash, Value: SwapIntent
     mapping(bytes32 => SwapIntent) private revealStorage;
+    
+    // ZK Privacy: Track commitments verified with ZK proofs
+    // Key: commitmentHash, Value: true if verified with ZK proof
+    mapping(bytes32 => bool) public verifiedCommitments;
 
     // Configurable parameters
     uint256 public constant MIN_COMMITMENTS = 2;
@@ -131,9 +141,9 @@ contract PrivBatchHook is BaseHook, IUnlockCallback {
 
     // ============ Constructor ============
     // ZK Verifier for commitment proofs
-    address public immutable verifier;
+    Groth16Verifier public immutable verifier;
 
-    constructor(IPoolManager _poolManager, address _verifier) BaseHook(_poolManager) {
+    constructor(IPoolManager _poolManager, Groth16Verifier _verifier) BaseHook(_poolManager) {
         verifier = _verifier;
     }
 
@@ -187,6 +197,81 @@ contract PrivBatchHook is BaseHook, IUnlockCallback {
 
         // Privacy-enhanced: Don't emit committer address
         emit CommitmentSubmitted(poolId, _commitmentHash);
+    }
+
+    /**
+     * @notice Submit a commitment with ZK proof (privacy-enhanced)
+     * @param key The pool key
+     * @param commitmentHash The commitment hash to verify
+     * @param a Proof component A (uint[2])
+     * @param b Proof component B (uint[2][2])
+     * @param c Proof component C (uint[2])
+     * @param publicSignals Public signals array (uint[1] - commitmentHash)
+     * @dev This function verifies a ZK proof that proves knowledge of the commitment pre-image
+     *      without revealing the actual swap parameters. The commitment is marked as verified.
+     *      Key privacy benefit: Trade parameters never appear in calldata or events.
+     */
+    function submitCommitmentWithProof(
+        PoolKey calldata key,
+        bytes32 commitmentHash,
+        uint[2] calldata a,
+        uint[2][2] calldata b,
+        uint[2] calldata c,
+        uint[1] calldata publicSignals
+    ) external {
+        PoolId poolId = key.toId();
+
+        // Verify proof on-chain
+        bool isValid = verifyCommitmentProof(a, b, c, publicSignals);
+        if (!isValid) revert InvalidCommitment();
+
+        // Verify public signal matches commitment hash
+        if (publicSignals[0] != uint256(commitmentHash)) revert InvalidCommitment();
+
+        // Check if commitment already exists
+        Commitment[] storage poolCommitments = commitments[poolId];
+        bool commitmentExists = false;
+        for (uint256 i = 0; i < poolCommitments.length; i++) {
+            if (poolCommitments[i].commitmentHash == commitmentHash) {
+                commitmentExists = true;
+                break;
+            }
+        }
+
+        // If commitment doesn't exist, create it
+        if (!commitmentExists) {
+            Commitment memory newCommitment = Commitment({
+                commitmentHash: commitmentHash,
+                committer: address(0),  // Anonymous commitment
+                timestamp: block.timestamp,
+                revealed: false
+            });
+            poolCommitments.push(newCommitment);
+            emit CommitmentSubmitted(poolId, commitmentHash);
+        }
+
+        // Mark commitment as verified with ZK proof
+        verifiedCommitments[commitmentHash] = true;
+
+        // Emit verification event
+        emit CommitmentVerified(poolId, commitmentHash);
+    }
+
+    /**
+     * @notice Internal function to verify ZK proof
+     * @param a Proof component A
+     * @param b Proof component B
+     * @param c Proof component C
+     * @param publicSignals Public signals (commitmentHash)
+     * @return isValid Whether the proof is valid
+     */
+    function verifyCommitmentProof(
+        uint[2] calldata a,
+        uint[2][2] calldata b,
+        uint[2] calldata c,
+        uint[1] calldata publicSignals
+    ) internal view returns (bool isValid) {
+        isValid = verifier.verifyProof(a, b, c, publicSignals);
     }
 
     /**
@@ -272,6 +357,156 @@ contract PrivBatchHook is BaseHook, IUnlockCallback {
 
         canExec = hasEnoughCommitments && intervalElapsed;
         execPayload = ""; // Not used - execution is permissionless
+    }
+
+    /**
+     * @notice Reveal commitments and execute batched swap with ZK proofs
+     * @param key The pool key
+     * @param commitmentHashes Array of commitment hashes
+     * @param proofsA Array of proof A components (uint[2] for each proof)
+     * @param proofsB Array of proof B components (uint[2][2] for each proof)
+     * @param proofsC Array of proof C components (uint[2] for each proof)
+     * @param publicSignalsArray Array of public signals arrays (each contains commitmentHash)
+     * @param intents Array of swap intents (revealed parameters)
+     * @dev This function verifies ZK proofs to ensure reveals match commitments,
+     *      then executes batch swap. ZK proofs prove knowledge without exposing parameters in calldata
+     *      until verification is complete.
+     *      Key privacy benefit: Proofs verify commitment-reveal match without storing reveals on-chain first.
+     */
+    function revealAndBatchExecuteWithProofs(
+        PoolKey calldata key,
+        bytes32[] calldata commitmentHashes,
+        uint[2][] calldata proofsA,
+        uint[2][2][] calldata proofsB,
+        uint[2][] calldata proofsC,
+        uint[1][] calldata publicSignalsArray,
+        SwapIntent[] calldata intents
+    ) external {
+        PoolId poolId = key.toId();
+
+        // Verify batch conditions
+        if (commitmentHashes.length < MIN_COMMITMENTS) revert InsufficientCommitments();
+        if (commitmentHashes.length != intents.length) revert InvalidCommitment();
+        if (commitmentHashes.length != proofsA.length) revert InvalidCommitment();
+
+        BatchState storage state = batchStates[poolId];
+        if (block.timestamp - state.lastBatchTimestamp < BATCH_INTERVAL) {
+            revert BatchConditionsNotMet();
+        }
+
+        // Verify all ZK proofs and commitment-reveal matches
+        _verifyZKProofs(commitmentHashes, proofsA, proofsB, proofsC, publicSignalsArray, intents);
+
+        // Process reveals and execute batch
+        Currency currency0 = key.currency0;
+        _processAndExecuteBatchWithProofs(poolId, key, intents, commitmentHashes, currency0, state);
+    }
+
+    /**
+     * @notice Verify all ZK proofs and commitment-reveal matches (helper to reduce stack depth)
+     */
+    function _verifyZKProofs(
+        bytes32[] calldata commitmentHashes,
+        uint[2][] calldata proofsA,
+        uint[2][2][] calldata proofsB,
+        uint[2][] calldata proofsC,
+        uint[1][] calldata publicSignalsArray,
+        SwapIntent[] calldata intents
+    ) internal view {
+        for (uint256 i = 0; i < commitmentHashes.length; i++) {
+            // Verify ZK proof
+            bool proofValid = verifyCommitmentProof(
+                proofsA[i],
+                proofsB[i],
+                proofsC[i],
+                publicSignalsArray[i]
+            );
+            if (!proofValid) revert InvalidCommitment();
+
+            // Verify public signal matches commitment hash
+            if (publicSignalsArray[i][0] != uint256(commitmentHashes[i])) {
+                revert InvalidCommitment();
+            }
+
+            // Verify intent matches commitment hash
+            bytes32 computedHash = _computeCommitmentHash(intents[i]);
+            if (computedHash != commitmentHashes[i]) revert InvalidCommitment();
+        }
+    }
+
+    /**
+     * @notice Compute commitment hash from swap intent (helper)
+     */
+    function _computeCommitmentHash(SwapIntent calldata intent) internal pure returns (bytes32) {
+        return keccak256(
+            abi.encode(
+                intent.user,
+                intent.tokenIn,
+                intent.tokenOut,
+                intent.amountIn,
+                intent.minAmountOut,
+                intent.recipient,
+                intent.nonce,
+                intent.deadline
+            )
+        );
+    }
+
+    /**
+     * @notice Process reveals and execute batch (helper to reduce stack depth)
+     */
+    function _processAndExecuteBatchWithProofs(
+        PoolId poolId,
+        PoolKey calldata key,
+        SwapIntent[] calldata intents,
+        bytes32[] calldata commitmentHashes,
+        Currency currency0,
+        BatchState storage state
+    ) internal {
+        // Process reveals and accumulate deltas
+        (int256 netDelta0, int256 netDelta1, UserContribution[] memory contributions) = 
+            _processReveals(poolId, intents, currency0, commitmentHashes);
+
+        // Privacy validation: Ensure netting is correct and no individual data leaks
+        _validateBatchPrivacy(netDelta0, netDelta1, currency0, contributions);
+
+        // Execute swap (only net deltas visible to pool)
+        BalanceDelta swapDelta = _executeBatchSwap(key, netDelta0, netDelta1);
+
+        // Validate slippage for all users before distribution
+        _validateSlippage(key, contributions, swapDelta, netDelta0, netDelta1);
+
+        // Distribute output tokens to recipients
+        _distributeTokens(key, contributions, swapDelta, netDelta0, netDelta1);
+
+        // Update state
+        state.lastBatchTimestamp = block.timestamp;
+        state.batchNonce++;
+
+        // Mark commitments as verified and revealed
+        Commitment[] storage poolCommitments = commitments[poolId];
+        for (uint256 i = 0; i < commitmentHashes.length; i++) {
+            verifiedCommitments[commitmentHashes[i]] = true;
+            // Mark commitment as revealed
+            for (uint256 j = 0; j < poolCommitments.length; j++) {
+                if (
+                    poolCommitments[j].commitmentHash == commitmentHashes[i] &&
+                    !poolCommitments[j].revealed
+                ) {
+                    poolCommitments[j].revealed = true;
+                    break;
+                }
+            }
+        }
+
+        // Emit event with actual swap results
+        emit BatchExecuted(
+            poolId,
+            swapDelta.amount0(),
+            swapDelta.amount1(),
+            commitmentHashes.length,
+            block.timestamp
+        );
     }
 
     /**

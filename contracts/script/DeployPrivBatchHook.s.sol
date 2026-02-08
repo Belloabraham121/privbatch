@@ -12,6 +12,9 @@ import {HookMiner} from "v4-periphery/src/utils/HookMiner.sol";
 import {Groth16Verifier} from "../CommitmentVerifier.sol";
 
 contract DeployPrivBatchHook is Script {
+    // CREATE2 Deployer Proxy (used by Forge for deterministic deployments)
+    address constant CREATE2_DEPLOYER = address(0x4e59b44847b379578588920cA78FbF26c0B4956C);
+    
     // Base Sepolia PoolManager address
     address constant POOLMANAGER = 0x05E73354cFDd6745C338b50BcFDfA3Aa6fA03408;
 
@@ -40,8 +43,9 @@ contract DeployPrivBatchHook is Script {
 
         // Find salt that gives us address with correct flags
         // Note: Hook constructor now takes both poolManager and verifier
+        // Use CREATE2_DEPLOYER for address mining (this is what Forge uses for CREATE2)
         (address hookAddress, bytes32 salt) = HookMiner.find(
-            deployer,
+            CREATE2_DEPLOYER,
             flags,
             type(PrivBatchHook).creationCode,
             abi.encode(IPoolManager(POOLMANAGER), address(verifier))
@@ -55,7 +59,7 @@ contract DeployPrivBatchHook is Script {
         console.log("\n=== Deploying PrivBatchHook ===");
         PrivBatchHook hook = new PrivBatchHook{salt: salt}(
             IPoolManager(POOLMANAGER),
-            address(verifier)
+            verifier
         );
 
         require(address(hook) == hookAddress, "Hook address mismatch");

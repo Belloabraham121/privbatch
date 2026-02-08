@@ -3,49 +3,49 @@
 ## 🤖 Agentic Component - Implementation Checklist
 
 ### 1. Agent Core Architecture
-- [ ] **Design agent interface and base classes**
-  - [ ] Create `TradingAgent` base class/interface
-  - [ ] Define `AgentConfig` interface (agentId, wallet, strategy, pools, etc.)
-  - [ ] Define `TradingStrategy` interface (shouldTrade, calculateAmount, etc.)
-  - [ ] Define `MarketData` interface (price, liquidity, volume, etc.)
-  - [ ] Define `TradeDecision` interface (shouldTrade, direction, confidence, reasoning)
+- [x] **Design agent interface and base classes**
+  - [x] Create `TradingAgent` base class/interface
+  - [x] Define `AgentConfig` interface (agentId, wallet, strategy, pools, etc.)
+  - [x] Define `TradingStrategy` interface (shouldTrade, calculateAmount, etc.)
+  - [x] Define `MarketData` interface (price, liquidity, volume, etc.)
+  - [x] Define `TradeDecision` interface (shouldTrade, direction, confidence, reasoning)
 
-- [ ] **Create agent manager/orchestrator**
-  - [ ] Create `AgentManager` class to manage multiple agents
-  - [ ] Implement agent registration and lifecycle management
-  - [ ] Implement monitoring loop (continuous pool monitoring)
-  - [ ] Implement batch execution coordination
-  - [ ] Add error handling and recovery for agent failures
+- [x] **Create agent manager/orchestrator**
+  - [x] Create `AgentManager` class to manage multiple agents
+  - [x] Implement agent registration and lifecycle management
+  - [x] Implement monitoring loop (continuous pool monitoring)
+  - [x] Implement batch execution coordination
+  - [x] Add error handling and recovery for agent failures
 
-- [ ] **Set up project structure**
-  - [ ] Create `agents/` folder structure
-  - [ ] Create `agents/TradingAgent.ts` - Core agent class
-  - [ ] Create `agents/AgentManager.ts` - Agent orchestration
-  - [ ] Create `agents/strategies/` - Trading strategy implementations
-  - [ ] Create `agents/utils/` - Utility functions (market data, pool monitoring)
-  - [ ] Create `agents/config/` - Configuration files
+- [x] **Set up project structure**
+  - [x] Create `agents/` folder structure
+  - [x] Create `agents/TradingAgent.ts` - Core agent class (located in `strategies/TradingAgent.ts`)
+  - [x] Create `agents/AgentManager.ts` - Agent orchestration
+  - [x] Create `agents/strategies/` - Trading strategy implementations
+  - [x] Create `agents/utils/` - Utility functions (market data, pool monitoring)
+  - [x] Create `agents/config/` - Configuration files
 
 ### 2. Market Data & Pool Monitoring
-- [ ] **Implement market data fetching**
-  - [ ] Create `utils/marketData.ts` for fetching pool data
-  - [ ] Implement price fetching from Uniswap v4 pools
-  - [ ] Implement liquidity fetching
-  - [ ] Implement volume calculation (24h, 1h)
-  - [ ] Implement price change calculation (1h, 24h)
-  - [ ] Implement recent swap event fetching
-  - [ ] Add caching for performance
+- [x] **Implement market data fetching**
+  - [x] Create `utils/marketData.ts` for fetching pool data
+  - [x] Implement price fetching from Uniswap v4 pools
+  - [x] Implement liquidity fetching
+  - [x] Implement volume calculation (24h, 1h)
+  - [x] Implement price change calculation (1h, 24h) (simplified - returns 0, needs historical data storage)
+  - [x] Implement recent swap event fetching
+  - [x] Add caching for performance
 
-- [ ] **Implement pool monitoring**
-  - [ ] Create `utils/poolMonitor.ts` for continuous monitoring
-  - [ ] Implement event listeners for pool state changes
-  - [ ] Implement periodic polling for pool data
-  - [ ] Add support for multiple pools
-  - [ ] Add error handling for RPC failures
+- [x] **Implement pool monitoring**
+  - [x] Create `utils/poolMonitor.ts` for continuous monitoring
+  - [x] Implement event listeners for pool state changes
+  - [x] Implement periodic polling for pool data
+  - [x] Add support for multiple pools
+  - [x] Add error handling for RPC failures
 
-- [ ] **Create market data types**
-  - [ ] Define `MarketData` type with all required fields
-  - [ ] Define `PoolKey` type mapping
-  - [ ] Define `SwapEvent` type for recent swaps
+- [x] **Create market data types**
+  - [x] Define `MarketData` type with all required fields (in `types/interfaces.ts`)
+  - [x] Define `PoolKey` type mapping (in `types/interfaces.ts`)
+  - [x] Define `SwapEvent` type for recent swaps (in `types/interfaces.ts`)
   - [ ] Add validation for market data
 
 ### 3. Trading Strategy Implementations
