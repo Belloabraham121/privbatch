@@ -252,7 +252,7 @@ async function testEndToEndZKFlow() {
         USDT_ADDRESS,   // tokenIn: USDT
         USDC_ADDRESS,   // tokenOut: USDC
         '1000000',      // amountIn: 1000000 USDT units (tiny amount)
-        '800000',       // minAmountOut: 800000 USDC units
+        '500000',       // minAmountOut: ~50% slippage tolerance (pool has limited liquidity)
         user,
         1,
         deadline
@@ -264,7 +264,7 @@ async function testEndToEndZKFlow() {
         USDT_ADDRESS,   // tokenIn: USDT
         USDC_ADDRESS,   // tokenOut: USDC
         '1000000',      // amountIn: 1000000 USDT units (tiny amount)
-        '800000',       // minAmountOut: 800000 USDC units
+        '500000',       // minAmountOut: ~50% slippage tolerance
         user,
         2,
         deadline
@@ -276,7 +276,7 @@ async function testEndToEndZKFlow() {
         USDC_ADDRESS,   // tokenIn: USDC
         USDT_ADDRESS,   // tokenOut: USDT
         '500000',       // amountIn: 500000 USDC units (0.5 USDC)
-        '400000',       // minAmountOut: 400000 USDT units
+        '250000',       // minAmountOut: ~50% slippage tolerance
         user,
         3,
         deadline
@@ -349,6 +349,9 @@ async function testEndToEndZKFlow() {
                 continue;
             }
             console.log(`   ✅ Confirmed in block ${receipt.blockNumber} (status: ${receipt.status})`);
+
+            // Small delay for RPC state sync before querying
+            await new Promise(resolve => setTimeout(resolve, 1000));
 
             // Verify commitment is marked as verified
             const isVerified = await hook.verifiedCommitments(commitmentHash);
@@ -614,6 +617,9 @@ async function testEndToEndZKFlow() {
                 '0xc4273932': 'NetDeltaMismatch() - Net deltas dont match contributions',
                 '0x7055054e': 'SwapExecutionFailed() - Swap execution failed',
                 '0x2f8d7a76': 'InvalidSwapDirection() - Invalid swap direction',
+                '0x5212cba1': 'CurrencyNotSettled() - V4 PoolManager: tokens not settled properly',
+                '0x56a270ff': 'SlippageExceededForUser(address,uint256,uint256) - Output less than minAmountOut',
+                '0x8199f5f3': 'SlippageExceeded() - Slippage exceeded',
             };
             
             const selector = errorData.slice(0, 10); // First 4 bytes + 0x
