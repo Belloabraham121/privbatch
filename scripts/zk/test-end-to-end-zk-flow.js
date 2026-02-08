@@ -62,7 +62,8 @@ const ZKEY_PATH = path.join(__dirname, '../../build/zk/final.zkey');
 
 // Base Sepolia addresses
 const USDC_ADDRESS = '0x036CbD53842c5426634e7929541eC2318f3dCF7e'; // USDC on Base Sepolia
-const USDT_ADDRESS = '0x4DBD49a3aE90Aa5F13091ccD29A896cbb5B171EB'; // USDT on Base Sepolia
+// USDT address - use from env or default to the mock USDT we deployed
+const USDT_ADDRESS = process.env.MOCK_USDT_ADDRESS || process.env.USDT_ADDRESS || '0x0Ea67A670a4182Db6eB18A6aAbC0f75195ef2EfC'; // Mock USDT on Base Sepolia
 
 // Load ABI
 const PRIV_BATCH_HOOK_ABI = [
@@ -72,6 +73,13 @@ const PRIV_BATCH_HOOK_ABI = [
     "function getCommitments(bytes32 poolId) view returns (tuple(bytes32 commitmentHash, address committer, uint256 timestamp, bool revealed)[])",
     "event CommitmentVerified(bytes32 indexed poolId, bytes32 indexed commitmentHash)",
     "event BatchExecuted(bytes32 indexed poolId, int256 netDelta0, int256 netDelta1, uint256 batchSize, uint256 timestamp)"
+];
+
+// ERC20 ABI for token approvals
+const ERC20_ABI = [
+    "function approve(address spender, uint256 amount) returns (bool)",
+    "function allowance(address owner, address spender) view returns (uint256)",
+    "function balanceOf(address account) view returns (uint256)"
 ];
 
 /**
@@ -216,58 +224,64 @@ async function testEndToEndZKFlow() {
     }
 
     // Step 1: Create multiple swap intents (simulating different users)
-    console.log('\n📝 Step 1: Creating swap intents for multiple users');
+    console.log('\n📝 Step 1: Creating swap intents (single user, different nonces)');
     console.log('-'.repeat(60));
 
-    const users = [
-        signer.address, // User 1 (signer)
-        ethers.Wallet.createRandom().address, // User 2
-        ethers.Wallet.createRandom().address, // User 3
-    ];
-
+    const user = signer.address;
     const swapIntents = [];
     const deadline = Math.floor(Date.now() / 1000) + 3600; // 1 hour from now
 
-    // Get USDT decimals (18 for mock USDT)
-    const usdtDecimals = 18; // Mock USDT has 18 decimals
-    
-    // User 1: Swap 1 USDC for USDT
+    // Pool is USDC (6 decimals, token0) / USDT (18 decimals, token1) at 1:1 raw price
+    // We need intents in BOTH directions so net deltas have opposite signs
+    //
+    // Intent 1 (nonce 1): sell USDT → buy USDC
+    //   netDelta1 += 1000000, netDelta0 -= 800000
+    // Intent 2 (nonce 2): sell USDT → buy USDC
+    //   netDelta1 += 1000000, netDelta0 -= 800000
+    // Intent 3 (nonce 3): sell USDC → buy USDT
+    //   netDelta0 += 500000, netDelta1 -= 400000
+    //
+    // Net: netDelta0 = 500000 - 800000 - 800000 = -1100000 (< 0)
+    //      netDelta1 = 1000000 + 1000000 - 400000 = 1600000 (> 0)
+    // ✅ Opposite signs = valid batch
+
+    // Intent 1: sell USDT → buy USDC (nonce 1)
     swapIntents.push(createSwapIntent(
-        users[0],
-        USDT_ADDRESS,
-        USDC_ADDRESS,
-        ethers.parseUnits('1', 6), // 1 USDC (6 decimals)
-        ethers.parseUnits('0.99', usdtDecimals), // Min 0.99 USDT (18 decimals)
-        users[0],
+        user,
+        USDT_ADDRESS,   // tokenIn: USDT
+        USDC_ADDRESS,   // tokenOut: USDC
+        '1000000',      // amountIn: 1000000 USDT units (tiny amount)
+        '800000',       // minAmountOut: 800000 USDC units
+        user,
         1,
         deadline
     ));
 
-    // User 2: Swap 1 USDC for USDT
+    // Intent 2: sell USDT → buy USDC (nonce 2)
     swapIntents.push(createSwapIntent(
-        users[1],
-        USDC_ADDRESS,
-        USDT_ADDRESS,
-        ethers.parseUnits('1', 6), // 1 USDC
-        ethers.parseUnits('0.99', usdtDecimals), // Min 0.99 USDT (18 decimals)
-        users[1],
-        1,
+        user,
+        USDT_ADDRESS,   // tokenIn: USDT
+        USDC_ADDRESS,   // tokenOut: USDC
+        '1000000',      // amountIn: 1000000 USDT units (tiny amount)
+        '800000',       // minAmountOut: 800000 USDC units
+        user,
+        2,
         deadline
     ));
 
-    // User 3: Swap 1 USDC for USDT
+    // Intent 3: sell USDC → buy USDT (nonce 3)
     swapIntents.push(createSwapIntent(
-        users[2],
-        USDC_ADDRESS,
-        USDT_ADDRESS,
-        ethers.parseUnits('1', 6), // 1 USDC
-        ethers.parseUnits('0.99', usdtDecimals), // Min 0.99 USDT (18 decimals)
-        users[2],
-        1,
+        user,
+        USDC_ADDRESS,   // tokenIn: USDC
+        USDT_ADDRESS,   // tokenOut: USDT
+        '500000',       // amountIn: 500000 USDC units (0.5 USDC)
+        '400000',       // minAmountOut: 400000 USDT units
+        user,
+        3,
         deadline
     ));
 
-    console.log(`✅ Created ${swapIntents.length} swap intents`);
+    console.log(`✅ Created ${swapIntents.length} swap intents (all from signer, different nonces)`);
 
     // Step 2: Generate proofs for all swap intents
     console.log('\n🔐 Step 2: Generating ZK proofs off-chain');
@@ -306,13 +320,24 @@ async function testEndToEndZKFlow() {
         console.log(`   Commitment hash: ${commitmentHash}`);
 
         try {
+            // Add delay between transactions to avoid nonce conflicts
+            if (i > 0) {
+                console.log(`   ⏳ Waiting 2 seconds before next transaction...`);
+                await new Promise(resolve => setTimeout(resolve, 2000));
+            }
+
+            // Get current nonce to avoid conflicts
+            const currentNonce = await provider.getTransactionCount(signer.address, 'pending');
+            console.log(`   📝 Using nonce: ${currentNonce}`);
+
             const tx = await hook.submitCommitmentWithProof(
                 poolKey,
                 commitmentHash,
                 formattedProof.a,
                 formattedProof.b,
                 formattedProof.c,
-                [proofData.publicSignals[0]]
+                [proofData.publicSignals[0]],
+                { nonce: currentNonce } // Explicitly set nonce
             );
 
             console.log(`   Transaction: ${tx.hash}`);
@@ -331,8 +356,43 @@ async function testEndToEndZKFlow() {
             commitmentHashes.push(commitmentHash);
             transactionHashes.push(tx.hash); // Store transaction hash
         } catch (error) {
-            console.error(`   ❌ Error submitting commitment:`, error.message);
-            throw error;
+            // Handle nonce/replacement errors more gracefully
+            if (error.code === 'REPLACEMENT_UNDERPRICED' || error.message.includes('replacement')) {
+                console.error(`   ❌ Nonce conflict. Waiting 5 seconds and retrying...`);
+                await new Promise(resolve => setTimeout(resolve, 5000));
+                
+                // Retry once with fresh nonce
+                try {
+                    const currentNonce = await provider.getTransactionCount(signer.address, 'pending');
+                    const tx = await hook.submitCommitmentWithProof(
+                        poolKey,
+                        commitmentHash,
+                        formattedProof.a,
+                        formattedProof.b,
+                        formattedProof.c,
+                        [proofData.publicSignals[0]],
+                        { nonce: currentNonce }
+                    );
+                    console.log(`   Transaction (retry): ${tx.hash}`);
+                    const receipt = await tx.wait();
+                    console.log(`   ✅ Confirmed in block ${receipt.blockNumber}`);
+                    
+                    const isVerified = await hook.verifiedCommitments(commitmentHash);
+                    if (isVerified) {
+                        console.log(`   ✅ Commitment verified on-chain`);
+                        commitmentHashes.push(commitmentHash);
+                        transactionHashes.push(tx.hash);
+                    } else {
+                        console.log(`   ❌ Commitment NOT verified after retry`);
+                    }
+                } catch (retryError) {
+                    console.error(`   ❌ Retry failed:`, retryError.message);
+                    throw retryError;
+                }
+            } else {
+                console.error(`   ❌ Error submitting commitment:`, error.message);
+                throw error;
+            }
         }
     }
 
@@ -406,8 +466,37 @@ async function testEndToEndZKFlow() {
     console.log(`   Commitment hashes: ${commitmentHashes.length}`);
     console.log(`   Swap intents: ${intents.length}`);
 
-    // Step 6: Execute batch with proofs
-    console.log('\n🚀 Step 6: Executing batch with ZK proofs');
+    // Step 6: Approve tokens for batch execution
+    console.log('\n🔑 Step 6: Approving tokens to hook for batch execution');
+    console.log('-'.repeat(60));
+
+    const usdc = new ethers.Contract(USDC_ADDRESS, ERC20_ABI, signer);
+    const usdt = new ethers.Contract(USDT_ADDRESS, ERC20_ABI, signer);
+
+    try {
+        // Check balances
+        const usdcBalance = await usdc.balanceOf(signer.address);
+        const usdtBalance = await usdt.balanceOf(signer.address);
+        console.log(`   USDC balance: ${usdcBalance} units`);
+        console.log(`   USDT balance: ${usdtBalance} units`);
+
+        // Approve hook to spend USDC (for intent 3: 500000 units)
+        const usdcApprovalAmount = ethers.parseUnits('10', 6); // 10 USDC (generous)
+        const approveTx1 = await usdc.approve(hookAddress, usdcApprovalAmount);
+        await approveTx1.wait();
+        console.log(`   ✅ Approved hook for ${usdcApprovalAmount} USDC units`);
+
+        // Approve hook to spend USDT (for intents 1+2: 2000000 units)
+        const usdtApprovalAmount = ethers.parseUnits('1', 18); // 1 USDT (generous)
+        const approveTx2 = await usdt.approve(hookAddress, usdtApprovalAmount);
+        await approveTx2.wait();
+        console.log(`   ✅ Approved hook for ${usdtApprovalAmount} USDT units`);
+    } catch (error) {
+        console.error(`   ❌ Approval error: ${error.message}`);
+    }
+
+    // Step 7: Execute batch with proofs
+    console.log('\n🚀 Step 7: Executing batch with ZK proofs');
     console.log('-'.repeat(60));
     // Get constants from contract
     let minCommitments = 2; // Default fallback
@@ -430,6 +519,18 @@ async function testEndToEndZKFlow() {
         ['address', 'address', 'uint24', 'int24', 'address'],
         [poolKey.currency0, poolKey.currency1, poolKey.fee, poolKey.tickSpacing, poolKey.hooks]
     ));
+
+    // Check batch state
+    try {
+        // Try to read batch state (if there's a view function, otherwise we'll just try)
+        console.log(`\n📊 Checking batch state...`);
+        const currentTimestamp = Math.floor(Date.now() / 1000);
+        console.log(`   Current timestamp: ${currentTimestamp}`);
+        console.log(`   Batch interval: ${batchInterval} seconds (${batchInterval / 60} minutes)`);
+        console.log(`   Pool ID: ${poolId}`);
+    } catch (e) {
+        // No view function, continue
+    }
 
     try {
         console.log(`\n📤 Attempting batch execution...`);
@@ -477,10 +578,16 @@ async function testEndToEndZKFlow() {
         if (errorData) {
             // Common error selectors (first 4 bytes of keccak256(error signature))
             const errorSelectors = {
-                '0xc06789fa': 'BatchConditionsNotMet() - Pool may not have liquidity, or batch interval not met',
+                '0xc06789fa': 'InvalidCommitment() - Commitment hash/proof verification failed',
+                '0x6f47c6d1': 'BatchConditionsNotMet() - Batch interval not elapsed',
+                '0xb89fa406': 'InsufficientCommitments() - Not enough commitments',
                 '0x7983c051': 'PoolAlreadyInitialized() - Pool already initialized',
-                '0x4e663b0d': 'InsufficientCommitments() - Not enough commitments',
-                '0x5c60da1b': 'InvalidCommitment() - Commitment verification failed',
+                '0x1ab7da6b': 'DeadlineExpired() - Swap intent deadline passed',
+                '0x756688fe': 'InvalidNonce() - Nonce already used',
+                '0xda414741': 'InvalidNetDeltaSign() - Net deltas must have opposite signs',
+                '0xc4273932': 'NetDeltaMismatch() - Net deltas dont match contributions',
+                '0x7055054e': 'SwapExecutionFailed() - Swap execution failed',
+                '0x2f8d7a76': 'InvalidSwapDirection() - Invalid swap direction',
             };
             
             const selector = errorData.slice(0, 10); // First 4 bytes + 0x
@@ -500,7 +607,7 @@ async function testEndToEndZKFlow() {
         console.log(`   - Waiting for BATCH_INTERVAL`);
     }
 
-    // Step 7: Summary
+    // Step 8: Summary
     console.log('\n' + '='.repeat(60));
     console.log('📊 End-to-End ZK Flow Test Summary');
     console.log('='.repeat(60));

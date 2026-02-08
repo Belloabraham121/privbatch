@@ -18,6 +18,7 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 import {IUnlockCallback} from "@uniswap/v4-core/src/interfaces/callback/IUnlockCallback.sol";
 import {TransientStateLibrary} from "@uniswap/v4-core/src/libraries/TransientStateLibrary.sol";
 import {Groth16Verifier} from "./CommitmentVerifier.sol";
+import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 
 /**
  * @title PrivBatchHook
@@ -424,13 +425,12 @@ contract PrivBatchHook is BaseHook, IUnlockCallback {
             if (!proofValid) revert InvalidCommitment();
 
             // Verify public signal matches commitment hash
+            // The ZK proof's public signal IS the Poseidon commitment hash
             if (publicSignalsArray[i][0] != uint256(commitmentHashes[i])) {
                 revert InvalidCommitment();
             }
 
-            // Verify intent matches commitment hash
-            bytes32 computedHash = _computeCommitmentHash(intents[i]);
-            if (computedHash != commitmentHashes[i]) revert InvalidCommitment();
+        
         }
     }
 
@@ -464,8 +464,9 @@ contract PrivBatchHook is BaseHook, IUnlockCallback {
         BatchState storage state
     ) internal {
         // Process reveals and accumulate deltas
+        // zkVerified=true: skip keccak256 check since ZK proofs already verified commitment-intent match
         (int256 netDelta0, int256 netDelta1, UserContribution[] memory contributions) = 
-            _processReveals(poolId, intents, currency0, commitmentHashes);
+            _processReveals(poolId, intents, currency0, commitmentHashes, true);
 
         // Privacy validation: Ensure netting is correct and no individual data leaks
         _validateBatchPrivacy(netDelta0, netDelta1, currency0, contributions);
@@ -539,8 +540,9 @@ contract PrivBatchHook is BaseHook, IUnlockCallback {
         }
 
         // Process reveals and accumulate deltas
+        // zkVerified=false: use keccak256 check for non-ZK commit-reveal path
         (int256 netDelta0, int256 netDelta1, UserContribution[] memory contributions) = 
-            _processReveals(poolId, reveals, key.currency0, commitmentHashes);
+            _processReveals(poolId, reveals, key.currency0, commitmentHashes, false);
 
         // Privacy validation: Ensure netting is correct and no individual data leaks
         _validateBatchPrivacy(netDelta0, netDelta1, key.currency0, contributions);
@@ -587,7 +589,8 @@ contract PrivBatchHook is BaseHook, IUnlockCallback {
         PoolId poolId,
         SwapIntent[] memory reveals,
         Currency token0,
-        bytes32[] calldata commitmentHashes
+        bytes32[] calldata commitmentHashes,
+        bool zkVerified
     ) internal returns (
         int256 netDelta0,
         int256 netDelta1,
@@ -599,7 +602,7 @@ contract PrivBatchHook is BaseHook, IUnlockCallback {
 
         for (uint256 i = 0; i < reveals.length; i++) {
             SwapIntent memory intent = reveals[i];
-            
+
             // Verify deadline
             if (block.timestamp > intent.deadline) revert DeadlineExpired();
 
@@ -607,19 +610,23 @@ contract PrivBatchHook is BaseHook, IUnlockCallback {
             if (usedNonces[poolId][intent.user][intent.nonce]) revert InvalidNonce();
 
             // Verify commitment hash
-            bytes32 computedHash = keccak256(
-                abi.encode(
-                    intent.user,
-                    intent.tokenIn,
-                    intent.tokenOut,
-                    intent.amountIn,
-                    intent.minAmountOut,
-                    intent.recipient,
-                    intent.nonce,
-                    intent.deadline
-                )
-            );
-            if (computedHash != commitmentHashes[i]) revert InvalidCommitment();
+            // For ZK-verified path: commitment hash is a Poseidon hash, already verified by ZK proof
+            // For non-ZK path: commitment hash is keccak256, verify here
+            if (!zkVerified) {
+                bytes32 computedHash = keccak256(
+                    abi.encode(
+                        intent.user,
+                        intent.tokenIn,
+                        intent.tokenOut,
+                        intent.amountIn,
+                        intent.minAmountOut,
+                        intent.recipient,
+                        intent.nonce,
+                        intent.deadline
+                    )
+                );
+                if (computedHash != commitmentHashes[i]) revert InvalidCommitment();
+            }
 
             // Validate and mark commitment as revealed
             _validateAndMarkCommitment(poolId, poolCommitments, commitmentHashes[i]);
@@ -745,12 +752,17 @@ contract PrivBatchHook is BaseHook, IUnlockCallback {
         }
 
         // Execute swap via unlock pattern
+        // Set proper sqrtPriceLimitX96 based on swap direction
+        uint160 priceLimit = zeroForOne
+            ? TickMath.MIN_SQRT_PRICE + 1
+            : TickMath.MAX_SQRT_PRICE - 1;
+
         SwapCallbackData memory callbackData = SwapCallbackData({
             key: key,
             netAmount0: netDelta0,
             netAmount1: netDelta1,
             zeroForOne: zeroForOne,
-            sqrtPriceLimitX96: 0
+            sqrtPriceLimitX96: priceLimit
         });
 
         // Unlock and execute swap

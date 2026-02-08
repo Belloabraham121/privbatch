@@ -23,20 +23,22 @@ contract SetupPoolLiquidity is Script {
     address constant POSITION_MANAGER = 0x4B2C77d209D3405F41a037Ec6c77F7F5b8e2ca80;
     address constant PERMIT2 = 0x000000000022D473030F116dDEE9F6B43aC78BA3;
     
-    // Token addresses (set via env or use defaults)
-    address constant USDC = 0x036CbD53842c5426634e7929541eC2318f3dCF7e;
-    address constant USDT = 0x0Ea67A670a4182Db6eB18A6aAbC0f75195ef2EfC; // Will be set from env or deployment
+    // Mock token addresses
+    // IMPORTANT: currency0 must be < currency1 in Uniswap V4
+    // USDT (0x0Ea...) < USDC (0x983...) so: currency0 = USDT, currency1 = USDC
+    address constant MOCK_USDT = 0x0Ea67A670a4182Db6eB18A6aAbC0f75195ef2EfC; // MockUSDT (18 decimals)
+    address constant MOCK_USDC = 0x98346718c549Ed525201fC583796eCf2eaCC0aD5; // MockUSDC (6 decimals)
     
     // Pool parameters
     uint24 constant FEE = 3000; // 0.3%
     int24 constant TICK_SPACING = 60;
-    address constant HOOK = 0x4493E9d873c049f15ca4Fc1eB94044a5bE3440c4;
+    address constant HOOK = 0x441aAB0C9BD5E1EF2924d1b6ca8a6495938500c4;
     
-    // Liquidity amounts
-    uint256 constant AMOUNT0_DESIRED = 10 * 10**6; // 10 USDC (6 decimals)
-    uint256 constant AMOUNT1_DESIRED = 102 * 10**17; // 10.2 USDT (18 decimals)
-    uint128 constant AMOUNT0_MIN = uint128(AMOUNT0_DESIRED * 95 / 100); // 5% slippage
-    uint128 constant AMOUNT1_MIN = uint128(AMOUNT1_DESIRED * 95 / 100); // 5% slippage
+    // Liquidity amounts — currency0 = USDT (18 dec), currency1 = USDC (6 dec)
+    uint256 constant AMOUNT0_DESIRED = 102 * 10**17; // 10.2 USDT (18 decimals) — currency0
+    uint256 constant AMOUNT1_DESIRED = 10 * 10**6;   // 10 USDC (6 decimals) — currency1
+    uint128 constant AMOUNT0_MIN = uint128(AMOUNT0_DESIRED * 95 / 100);
+    uint128 constant AMOUNT1_MIN = uint128(AMOUNT1_DESIRED * 95 / 100);
 
     function run() external {
         uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");
@@ -74,26 +76,15 @@ contract SetupPoolLiquidity is Script {
         // Step 1: Initialize pool (if not already initialized)
         console.log("\n=== Step 1: Initializing Pool ===");
         uint160 sqrtPriceX96 = uint160(79228162514264337593543950336); // 2^96 (1:1 price)
-        
-        // Check if pool is already initialized by reading slot0 using extsload
-        PoolId poolId = poolKey.toId();
-        
-        // Calculate slot0 storage slot: keccak256(abi.encode(poolId, uint256(0)))
-        bytes32 slot0Slot = keccak256(abi.encode(poolId, uint256(0)));
-        
-        // Try to read slot0 using extsload (view call, won't be broadcast)
-        bool poolInitialized = false;
-        try poolManager.extsload(slot0Slot) returns (bytes32 slot0Value) {
-            // Check if sqrtPriceX96 (lower 160 bits) is non-zero
-            uint160 sqrtPrice = uint160(uint256(slot0Value));
-            poolInitialized = sqrtPrice != 0;
-        } catch {}
-        
-        if (!poolInitialized) {
-            poolManager.initialize(poolKey, sqrtPriceX96);
-            console.log("Pool initialized");
-        } else {
-            console.log("Pool already initialized, skipping...");
+        try poolManager.initialize(poolKey, sqrtPriceX96) returns (int24 tick) {
+            console.log("Pool initialized, tick:", tick);
+        } catch (bytes memory reason) {
+            // Check if error is PoolAlreadyInitialized (0x7983c051)
+            if (reason.length >= 4 && bytes4(reason) == bytes4(0x7983c051)) {
+                console.log("Pool already initialized, skipping...");
+            } else {
+                revert("Pool initialization failed");
+            }
         }
 
         // Step 2: Approve tokens via Permit2
@@ -102,52 +93,42 @@ contract SetupPoolLiquidity is Script {
         IERC20 usdt = IERC20(usdtAddress);
         IAllowanceTransfer permit2 = IAllowanceTransfer(PERMIT2);
         
-        // Step 2a: Approve tokens to Permit2
-        uint256 usdcPermit2Allowance = usdc.allowance(deployer, PERMIT2);
-        uint256 usdtPermit2Allowance = usdt.allowance(deployer, PERMIT2);
+        // Check balances
+        uint256 usdcBal = usdc.balanceOf(deployer);
+        uint256 usdtBal = usdt.balanceOf(deployer);
+        console.log("USDC balance:", usdcBal);
+        console.log("USDT balance:", usdtBal);
+        require(usdcBal >= AMOUNT0_DESIRED, "Insufficient USDC balance");
+        require(usdtBal >= AMOUNT1_DESIRED, "Insufficient USDT balance");
+
+        // Step 2a: Always re-approve tokens to Permit2 (ensure sufficient allowance)
+        usdc.approve(PERMIT2, type(uint256).max);
+        console.log("USDC approved to Permit2");
         
-        if (usdcPermit2Allowance < AMOUNT0_DESIRED) {
-            usdc.approve(PERMIT2, type(uint256).max);
-            console.log("USDC approved to Permit2");
-        } else {
-            console.log("USDC already approved to Permit2");
-        }
-        
-        if (usdtPermit2Allowance < AMOUNT1_DESIRED) {
-            usdt.approve(PERMIT2, type(uint256).max);
-            console.log("USDT approved to Permit2");
-        } else {
-            console.log("USDT already approved to Permit2");
-        }
+        usdt.approve(PERMIT2, type(uint256).max);
+        console.log("USDT approved to Permit2");
         
         // Step 2b: Approve PositionManager as spender in Permit2
-        // Check if already approved
-        (uint160 amount, uint48 expiration, uint48 nonce) = permit2.allowance(deployer, USDC, POSITION_MANAGER);
-        if (amount == 0 || expiration < block.timestamp) {
-            permit2.approve(USDC, POSITION_MANAGER, type(uint160).max, type(uint48).max);
-            console.log("PositionManager approved for USDC in Permit2");
-        } else {
-            console.log("PositionManager already approved for USDC in Permit2");
-        }
+        // Always re-approve to ensure sufficient allowance (previous mints may have depleted it)
+        permit2.approve(USDC, POSITION_MANAGER, type(uint160).max, type(uint48).max);
+        console.log("PositionManager approved for USDC in Permit2");
         
-        (amount, expiration, nonce) = permit2.allowance(deployer, usdtAddress, POSITION_MANAGER);
-        if (amount == 0 || expiration < block.timestamp) {
-            permit2.approve(usdtAddress, POSITION_MANAGER, type(uint160).max, type(uint48).max);
-            console.log("PositionManager approved for USDT in Permit2");
-        } else {
-            console.log("PositionManager already approved for USDT in Permit2");
-        }
+        permit2.approve(usdtAddress, POSITION_MANAGER, type(uint160).max, type(uint48).max);
+        console.log("PositionManager approved for USDT in Permit2");
 
         // Step 3: Calculate liquidity
         console.log("\n=== Step 3: Calculating Liquidity ===");
         int24 tickLower = -60;
         int24 tickUpper = 60;
         
+        // Use initial price (2^96 = 1:1 price) - pool was initialized with this
+        uint160 initialSqrtPriceX96 = uint160(79228162514264337593543950336);
+        
         uint160 sqrtPriceAX96 = TickMath.getSqrtPriceAtTick(tickLower);
         uint160 sqrtPriceBX96 = TickMath.getSqrtPriceAtTick(tickUpper);
         
         uint128 liquidity = LiquidityAmounts.getLiquidityForAmounts(
-            sqrtPriceX96,
+            initialSqrtPriceX96,
             sqrtPriceAX96,
             sqrtPriceBX96,
             AMOUNT0_DESIRED,
